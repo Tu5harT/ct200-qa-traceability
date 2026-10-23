@@ -53,9 +53,14 @@ class Node(Base):
     page = Column(Integer)
     order = Column(Integer)
 
+    # same section across versions shares a logical_id, e.g. "v1:3.2"
+    logical_id = Column(String, index=True)
+    status = Column(String)  # new / unchanged / changed / added
+    prev_node_id = Column(Integer, ForeignKey("nodes.id"))  # matching node in the previous version
+
     version = relationship("Version", back_populates="nodes")
-    parent = relationship("Node", remote_side=[id], back_populates="children")
-    children = relationship("Node", back_populates="parent", order_by="Node.order")
+    parent = relationship("Node", remote_side=[id], back_populates="children", foreign_keys=[parent_id])
+    children = relationship("Node", back_populates="parent", order_by="Node.order", foreign_keys=[parent_id])
 
 
 def create_tables():

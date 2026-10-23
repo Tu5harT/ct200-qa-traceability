@@ -3,6 +3,7 @@ import os
 
 from app.db import Document, Node, Version
 from app.parser import parse_pdf
+from app.versioning import link_versions
 
 
 def file_hash(path):
@@ -24,6 +25,7 @@ def ingest(session, path, doc_name="ct200_manual"):
             return v
 
     parsed = parse_pdf(path)
+    previous = doc.versions[-1] if doc.versions else None
 
     version = Version(
         document=doc,
@@ -38,6 +40,7 @@ def ingest(session, path, doc_name="ct200_manual"):
     # parser gives parents as section ids ("2.1"), the db needs row ids.
     # parents always come before children in the list, so one pass is enough
     by_section = {}
+    new_nodes = []
     for n in parsed["nodes"]:
         node = Node(
             version=version,
@@ -53,7 +56,9 @@ def ingest(session, path, doc_name="ct200_manual"):
         )
         session.add(node)
         by_section[n["id"]] = node
+        new_nodes.append(node)
 
+    link_versions(previous.nodes if previous else [], new_nodes, version.number)
     session.commit()
     return version
 
@@ -69,3 +74,6 @@ if __name__ == "__main__":
         print(f"{v.filename} -> version {v.number}, {len(v.nodes)} nodes")
         for w in v.warnings:
             print(" warning:", w)
+        for n in v.nodes:
+            if n.status not in ("new", "unchanged"):
+                print(f" {n.status}: {n.section_id} {n.heading}")

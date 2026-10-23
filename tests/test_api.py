@@ -71,3 +71,31 @@ def test_changes_between_v1_and_v2(client):
 
     old_31 = find(client, "3.1", version=1)
     assert client.get(f"/nodes/{old_31['id']}/changes").json()["changed"] is False
+
+
+def test_selection_keeps_old_text_after_v2(client):
+    client.post("/ingest", json={"filename": "ct200_manual.pdf"})
+    old_32 = find(client, "3.2", version=1)
+
+    sel = client.post("/selections", json={"name": "inflation", "node_ids": [old_32["id"]]})
+    assert sel.status_code == 201
+    sel_id = sel.json()["id"]
+
+    client.post("/ingest", json={"filename": "ct200_manual_v2.pdf"})
+
+    # still the v1 text, even though v2 is now the latest
+    after = client.get(f"/selections/{sel_id}").json()
+    assert after["version"] == 1
+    assert "40 mmHg increments" in after["nodes"][0]["body"]
+
+
+def test_selection_validation(client):
+    client.post("/ingest", json={"filename": "ct200_manual.pdf"})
+    client.post("/ingest", json={"filename": "ct200_manual_v2.pdf"})
+    v1_node = find(client, "3.2", version=1)["id"]
+    v2_node = find(client, "3.2", version=2)["id"]
+
+    assert client.post("/selections", json={"name": "x", "node_ids": []}).status_code == 422
+    assert client.post("/selections", json={"name": "x", "node_ids": [99999]}).status_code == 404
+    mixed = client.post("/selections", json={"name": "x", "node_ids": [v1_node, v2_node]})
+    assert mixed.status_code == 400

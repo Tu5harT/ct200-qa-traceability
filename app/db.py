@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Column, DateTime, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import JSON, Column, DateTime, ForeignKey, Integer, String, Table, Text, create_engine
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 DB_URL = os.getenv("DB_URL", "sqlite:///ct200.db")
@@ -61,6 +61,26 @@ class Node(Base):
     version = relationship("Version", back_populates="nodes")
     parent = relationship("Node", remote_side=[id], back_populates="children", foreign_keys=[parent_id])
     children = relationship("Node", back_populates="parent", order_by="Node.order", foreign_keys=[parent_id])
+
+
+selection_nodes = Table(
+    "selection_nodes",
+    Base.metadata,
+    Column("selection_id", Integer, ForeignKey("selections.id"), primary_key=True),
+    Column("node_id", Integer, ForeignKey("nodes.id"), primary_key=True),
+)
+
+
+class Selection(Base):
+    __tablename__ = "selections"
+
+    # points at node rows, and a node row is one section in one version.
+    # re-ingesting never edits old rows, so a selection always gives back the text it was made with
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    nodes = relationship("Node", secondary=selection_nodes, order_by="Node.order")
 
 
 def create_tables():

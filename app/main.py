@@ -1,10 +1,10 @@
 import os
 
 from fastapi import Depends, FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import or_
 
-from app.db import Document, Node, SessionLocal, Version, create_tables
+from app.db import Document, Node, Selection, SessionLocal, Version, create_tables
 from app.ingest import ingest
 from app.versioning import word_diff
 
@@ -145,3 +145,46 @@ def node_changes(node_id: int, db=Depends(get_db)):
             diff=word_diff(node.body, current.body),
         )
     return result
+
+
+class SelectionRequest(BaseModel):
+    name: str = Field(min_length=1)
+    node_ids: list[int] = Field(min_length=1)
+
+
+def selection_out(sel):
+    return {
+        "id": sel.id,
+        "name": sel.name,
+        "version": sel.nodes[0].version.number,
+        "created_at": sel.created_at,
+        # the exact text the selection was made against
+        "nodes": [{**short(n), "hash": n.hash, "body": n.body} for n in sel.nodes],
+    }
+
+
+@app.post("/selections", status_code=201)
+def create_selection(req: SelectionRequest, db=Depends(get_db)):
+    ids = set(req.node_ids)
+    nodes = db.query(Node).filter(Node.id.in_(ids)).all()
+
+    missing = ids - {n.id for n in nodes}
+    if missing:
+        raise HTTPException(404, f"unknown node ids: {sorted(missing)}")
+
+    # mixing v1 and v2 text in one selection would make the test cases meaningless
+    if len({n.version_id for n in nodes}) > 1:
+        raise HTTPException(400, "all nodes in a selection must be from the same version")
+
+    sel = Selection(name=req.name, nodes=nodes)
+    db.add(sel)
+    db.commit()
+    return selection_out(sel)
+
+
+@app.get("/selections/{selection_id}")
+def read_selection(selection_id: int, db=Depends(get_db)):
+    sel = db.get(Selection, selection_id)
+    if sel is None:
+        raise HTTPException(404, "selection not found")
+    return selection_out(sel)

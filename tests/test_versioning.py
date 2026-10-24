@@ -56,3 +56,12 @@ def test_duplicate_headings_are_not_guessed():
     old = [FakeNode("4.2", "Error Codes"), FakeNode("7.1", "Error Codes")]
     new = [FakeNode("4.5", "Error Codes"), FakeNode("7.3", "Error Codes")]
     assert match_nodes(old, new) == {}
+
+
+def test_change_kind():
+    from app.staleness import change_kind
+
+    assert change_kind("inflates in 40 mmHg steps", "inflates in 30 mmHg steps") == "numbers changed"
+    assert change_kind("the device shows E3", "the monitor shows E3") == "wording only"
+    # known gap: meaning flips but no digit changes
+    assert change_kind("falls below 15%", "rises above 15%") == "wording only"

@@ -110,8 +110,17 @@ class FakeStore:
         doc["_id"] = len(self.docs) + 1
         self.docs.append(doc)
 
+    def find(self, query):
+        def matches(doc, key, value):
+            if "." in key:  # "sources.logical_id" -> any item in the list matches
+                field, sub = key.split(".")
+                return any(item.get(sub) == value for item in doc.get(field, []))
+            return doc.get(key) == value
+
+        return [dict(d) for d in self.docs if all(matches(d, k, v) for k, v in query.items())]
+
     def find_one(self, query, sort=None):
-        found = [d for d in self.docs if all(d.get(k) == v for k, v in query.items())]
+        found = self.find(query)
         return found[-1] if found else None
 
 
@@ -154,3 +163,44 @@ def test_bad_llm_output_is_502_and_saved_as_failed(client, monkeypatch):
     assert r.status_code == 502
     assert store.docs[0]["status"] == "failed"
     assert "test_cases" not in store.docs[0]
+
+
+def test_tests_go_stale_after_v2(client, monkeypatch):
+    import json
+
+    from app import llm
+    from app.main import get_store
+    from tests.test_llm import case
+
+    store = FakeStore()
+    app.dependency_overrides[get_store] = lambda: store
+    reply = json.dumps({"test_cases": [case(sections=["3.2"]), case(sections=["3.1"]), case(sections=["5.1"])]})
+    monkeypatch.setattr(llm, "call_groq", lambda messages: reply)
+
+    client.post("/ingest", json={"filename": "ct200_manual.pdf"})
+    ids = [find(client, s, 1)["id"] for s in ("3.1", "3.2", "5")]  # "5" brings 5.1 and 5.2 with it
+    sel = client.post("/selections", json={"name": "x", "node_ids": ids}).json()
+    client.post(f"/selections/{sel['id']}/generate")
+
+    before = client.get("/generations", params={"selection_id": sel["id"]}).json()[0]
+    assert before["stale"] is False
+
+    client.post("/ingest", json={"filename": "ct200_manual_v2.pdf"})
+    after = client.get("/generations", params={"selection_id": sel["id"]}).json()[0]
+
+    assert after["stale"] is True
+    assert after["checked_against_version"] == 2
+    status = {s["section_id"]: s for s in after["source_status"]}
+    assert status["3.2"]["kind"] == "numbers changed"
+    assert status["3.1"]["status"] == "unchanged"
+    assert after["new_sections"] == ["5.3"]  # added under section 5, not covered by any test
+    # only the test built on 3.2 is stale
+    assert [c["stale"] for c in after["test_cases"]] == [True, False, False]
+
+    # asking with the v2 node of 3.2 still finds tests made from the v1 text
+    by_node = client.get("/generations", params={"node_id": find(client, "3.2", 2)["id"]}).json()
+    assert len(by_node) == 1
+
+
+def test_generations_needs_a_filter(client):
+    assert client.get("/generations").status_code == 400

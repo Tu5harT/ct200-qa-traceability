@@ -8,6 +8,7 @@ from sqlalchemy import or_
 from app import llm
 from app.db import Document, Node, Selection, SessionLocal, Version, create_tables
 from app.ingest import ingest
+from app.staleness import check_generation
 from app.store import get_store
 from app.versioning import word_diff
 
@@ -239,3 +240,21 @@ def generate_tests(selection_id: int, force: bool = False, db=Depends(get_db), s
     doc.update(status="ok", attempts=attempts, test_cases=[c.model_dump() for c in cases])
     store.insert_one(doc)
     return {**generation_out(doc), "reused": False}
+
+
+@app.get("/generations")
+def list_generations(selection_id: int = None, node_id: int = None, db=Depends(get_db), store=Depends(get_store)):
+    if selection_id is None and node_id is None:
+        raise HTTPException(400, "pass selection_id or node_id")
+
+    if selection_id is not None:
+        query = {"selection_id": selection_id}
+    else:
+        # by logical id, so asking with the v2 node also finds tests made from the v1 text
+        query = {"sources.logical_id": get_node(db, node_id).logical_id}
+    query["status"] = "ok"
+
+    latest = get_version(db)
+    docs = sorted(store.find(query), key=lambda d: d["created_at"], reverse=True)
+    # staleness is worked out now, not when the tests were saved, so it's always against the latest pdf
+    return [check_generation(db, generation_out(d), latest) for d in docs]

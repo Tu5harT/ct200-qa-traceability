@@ -211,13 +211,14 @@ def generate_tests(selection_id: int, force: bool = False, db=Depends(get_db), s
     # selections are pinned to fixed text, so a second run would just be a re-roll of the same input.
     # give back the saved one, unless the caller really wants a fresh one (force=true keeps the old one too)
     if not force:
-        existing = store.find_one({"selection_id": sel.id, "status": "ok"}, sort=[("created_at", -1)])
+        existing = store.find_one({"selection_uid": sel.uid, "status": "ok"}, sort=[("created_at", -1)])
         if existing:
             return {**generation_out(existing), "reused": True}
 
     nodes = llm.collect_nodes(sel.nodes)
     doc = {
-        "selection_id": sel.id,
+        "selection_uid": sel.uid,
+        "selection_id": sel.id,  # just for reading, lookups use the uid
         "selection_name": sel.name,
         "version": sel.nodes[0].version.number,
         # exact text the tests come from, this is what staleness gets checked against later
@@ -248,13 +249,16 @@ def list_generations(selection_id: int = None, node_id: int = None, db=Depends(g
         raise HTTPException(400, "pass selection_id or node_id")
 
     if selection_id is not None:
-        query = {"selection_id": selection_id}
+        query = {"selection_uid": get_selection(db, selection_id).uid}
     else:
         # by logical id, so asking with the v2 node also finds tests made from the v1 text
         query = {"sources.logical_id": get_node(db, node_id).logical_id}
     query["status"] = "ok"
 
     latest = get_version(db)
-    docs = sorted(store.find(query), key=lambda d: d["created_at"], reverse=True)
+    # skip generations whose selection isn't in this db (left over from a reset)
+    ours = {uid for (uid,) in db.query(Selection.uid)}
+    docs = [d for d in store.find(query) if d.get("selection_uid") in ours]
+    docs.sort(key=lambda d: d["created_at"], reverse=True)
     # staleness is worked out now, not when the tests were saved, so it's always against the latest pdf
     return [check_generation(db, generation_out(d), latest) for d in docs]

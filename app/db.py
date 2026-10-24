@@ -1,4 +1,5 @@
 import os
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import JSON, Column, DateTime, ForeignKey, Integer, String, Table, Text, create_engine
@@ -77,6 +78,9 @@ class Selection(Base):
     # points at node rows, and a node row is one section in one version.
     # re-ingesting never edits old rows, so a selection always gives back the text it was made with
     id = Column(Integer, primary_key=True)
+    # mongo links to this, not to id. if ct200.db gets reset the ids start at 1 again,
+    # and a new selection 1 would pick up the old selection 1's test cases
+    uid = Column(String, unique=True, nullable=False, default=lambda: uuid.uuid4().hex)
     name = Column(String, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 

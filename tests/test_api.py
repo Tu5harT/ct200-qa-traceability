@@ -204,3 +204,29 @@ def test_tests_go_stale_after_v2(client, monkeypatch):
 
 def test_generations_needs_a_filter(client):
     assert client.get("/generations").status_code == 400
+
+
+def test_leftover_generation_from_old_db_is_ignored(client, monkeypatch):
+    # this really happened: ct200.db was deleted, mongo wasn't, and the new selection 1
+    # got the old selection 1's test cases
+    from datetime import datetime
+
+    from app import llm
+    from app.main import get_store
+    from tests.test_llm import GOOD
+
+    store = FakeStore()
+    store.insert_one({"selection_uid": "from-old-db", "selection_id": 1, "status": "ok",
+                      "created_at": datetime(2026, 1, 1), "sources": [], "test_cases": []})
+    app.dependency_overrides[get_store] = lambda: store
+    monkeypatch.setattr(llm, "call_groq", lambda messages: GOOD)
+
+    client.post("/ingest", json={"filename": "ct200_manual.pdf"})
+    sel = client.post("/selections", json={"name": "x", "node_ids": [find(client, "3.2", 1)["id"]]}).json()
+    assert sel["id"] == 1
+
+    gen = client.post(f"/selections/{sel['id']}/generate").json()
+    assert gen["reused"] is False
+
+    listed = client.get("/generations", params={"selection_id": 1}).json()
+    assert [g["id"] for g in listed] == [gen["id"]]

@@ -99,3 +99,58 @@ def test_selection_validation(client):
     assert client.post("/selections", json={"name": "x", "node_ids": [99999]}).status_code == 404
     mixed = client.post("/selections", json={"name": "x", "node_ids": [v1_node, v2_node]})
     assert mixed.status_code == 400
+
+
+class FakeStore:
+    # just enough of a mongo collection for these tests
+    def __init__(self):
+        self.docs = []
+
+    def insert_one(self, doc):
+        doc["_id"] = len(self.docs) + 1
+        self.docs.append(doc)
+
+    def find_one(self, query, sort=None):
+        found = [d for d in self.docs if all(d.get(k) == v for k, v in query.items())]
+        return found[-1] if found else None
+
+
+def test_generate_twice_reuses_unless_forced(client, monkeypatch):
+    from app import llm
+    from app.main import get_store
+    from tests.test_llm import GOOD
+
+    store = FakeStore()
+    app.dependency_overrides[get_store] = lambda: store
+    monkeypatch.setattr(llm, "call_groq", lambda messages: GOOD)
+
+    client.post("/ingest", json={"filename": "ct200_manual.pdf"})
+    sel = client.post("/selections", json={"name": "x", "node_ids": [find(client, "3.2", 1)["id"]]}).json()
+
+    first = client.post(f"/selections/{sel['id']}/generate").json()
+    assert first["reused"] is False
+    assert first["sources"][0]["section_id"] == "3.2"
+
+    again = client.post(f"/selections/{sel['id']}/generate").json()
+    assert again["reused"] is True and again["id"] == first["id"]
+
+    forced = client.post(f"/selections/{sel['id']}/generate", params={"force": True}).json()
+    assert forced["id"] != first["id"]
+    assert len(store.docs) == 2
+
+
+def test_bad_llm_output_is_502_and_saved_as_failed(client, monkeypatch):
+    from app import llm
+    from app.main import get_store
+
+    store = FakeStore()
+    app.dependency_overrides[get_store] = lambda: store
+    monkeypatch.setattr(llm, "call_groq", lambda messages: "not json")
+
+    client.post("/ingest", json={"filename": "ct200_manual.pdf"})
+    sel = client.post("/selections", json={"name": "x", "node_ids": [find(client, "3.2", 1)["id"]]}).json()
+
+    r = client.post(f"/selections/{sel['id']}/generate")
+    assert r.status_code == 502
+    assert store.docs[0]["status"] == "failed"
+    assert "test_cases" not in store.docs[0]

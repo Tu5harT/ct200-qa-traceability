@@ -1,11 +1,14 @@
 import os
+from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import or_
 
+from app import llm
 from app.db import Document, Node, Selection, SessionLocal, Version, create_tables
 from app.ingest import ingest
+from app.store import get_store
 from app.versioning import word_diff
 
 DATA_DIR = "data"
@@ -184,7 +187,55 @@ def create_selection(req: SelectionRequest, db=Depends(get_db)):
 
 @app.get("/selections/{selection_id}")
 def read_selection(selection_id: int, db=Depends(get_db)):
+    return selection_out(get_selection(db, selection_id))
+
+
+def get_selection(db, selection_id):
     sel = db.get(Selection, selection_id)
     if sel is None:
         raise HTTPException(404, "selection not found")
-    return selection_out(sel)
+    return sel
+
+
+def generation_out(doc):
+    doc = dict(doc)
+    doc["id"] = str(doc.pop("_id"))
+    return doc
+
+
+@app.post("/selections/{selection_id}/generate")
+def generate_tests(selection_id: int, force: bool = False, db=Depends(get_db), store=Depends(get_store)):
+    sel = get_selection(db, selection_id)
+
+    # selections are pinned to fixed text, so a second run would just be a re-roll of the same input.
+    # give back the saved one, unless the caller really wants a fresh one (force=true keeps the old one too)
+    if not force:
+        existing = store.find_one({"selection_id": sel.id, "status": "ok"}, sort=[("created_at", -1)])
+        if existing:
+            return {**generation_out(existing), "reused": True}
+
+    nodes = llm.collect_nodes(sel.nodes)
+    doc = {
+        "selection_id": sel.id,
+        "selection_name": sel.name,
+        "version": sel.nodes[0].version.number,
+        # exact text the tests come from, this is what staleness gets checked against later
+        "sources": [
+            {"node_id": n.id, "logical_id": n.logical_id, "section_id": n.section_id, "hash": n.hash}
+            for n in nodes
+        ],
+        "model": llm.MODEL,
+        "prompt_version": llm.PROMPT_VERSION,
+        "created_at": datetime.now(timezone.utc),
+    }
+
+    try:
+        cases, attempts = llm.generate(llm.sections_text(nodes), {n.section_id for n in nodes})
+    except llm.GenerationFailed as e:
+        # keep the failure so we can see what the model sent, but never as usable test cases
+        store.insert_one({**doc, "status": "failed", "error": str(e), "raw": e.raw})
+        raise HTTPException(502, f"LLM gave invalid output {llm.MAX_ATTEMPTS} times: {e}")
+
+    doc.update(status="ok", attempts=attempts, test_cases=[c.model_dump() for c in cases])
+    store.insert_one(doc)
+    return {**generation_out(doc), "reused": False}
